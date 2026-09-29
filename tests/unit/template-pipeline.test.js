@@ -7,6 +7,25 @@ import { getBuiltinTemplate } from '../../functions/modules/subscription/builtin
 const SS2022_V2RAY_PLUGIN_NODE = 'ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TldSak1UVmxNVFZtTWpnMU5HRTVaRGsxT1dJd1pUUm1ZbVJrTnpkaU5qTT0@cf.090227.xyz:8080?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Bhost%3Dss.2227tsj.workers.dev%3Bpath%3D%2F%3Fenc%5C%3D2022-blake3-aes-256-gcm%3Bmux%3D0#2022-blake3-aes-256-gcm';
 
 describe('Template pipeline', () => {
+    it('renders current Aethersailor domain MRS rule providers with the declared behavior and refresh interval', () => {
+        const rendered = renderClashFromIniTemplate(`
+[custom]
+ruleset=🚀 手动选择,clash-domain:https://example.com/Custom_Proxy_Domain.mrs,1800
+ruleset=🎯 全球直连,clash-classic:https://example.com/Steam_CDN_Classical.yaml,28800
+ruleset=🚀 手动选择,[]FINAL
+custom_proxy_group=🚀 手动选择\`select\`[]DIRECT
+custom_proxy_group=🎯 全球直连\`select\`[]DIRECT
+        `);
+        const parsed = yaml.load(rendered);
+        const providers = Object.values(parsed['rule-providers']);
+        expect(providers).toEqual(expect.arrayContaining([
+            expect.objectContaining({ behavior: 'domain', format: 'mrs', interval: 1800, url: 'https://example.com/Custom_Proxy_Domain.mrs' }),
+            expect.objectContaining({ behavior: 'classical', interval: 28800, url: 'https://example.com/Steam_CDN_Classical.yaml' })
+        ]));
+        expect(parsed.rules.filter(rule => rule.startsWith('RULE-SET,'))).toHaveLength(2);
+        expect(parsed.rules.every(rule => !rule.includes('clash-domain:'))).toBe(true);
+    });
+
     it('uses current DNS server objects in sing-box templates', () => {
         const rendered = renderSingboxFromIniTemplate(`
 [Proxy Group]

@@ -137,7 +137,7 @@ export function renderClashFromTemplateModel(model) {
         let nameHint = 'rs';
         try {
             const urlPath = new URL(providerUrl).pathname;
-            const fileName = urlPath.split('/').pop()?.replace(/\.(yaml|yml|list|txt|conf)$/i, '') || '';
+            const fileName = urlPath.split('/').pop()?.replace(/\.(yaml|yml|list|txt|conf|mrs)$/i, '') || '';
             if (fileName) {
                 nameHint = fileName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
             }
@@ -148,13 +148,14 @@ export function renderClashFromTemplateModel(model) {
         const providerName = `${nameHint}_${providerCounter++}`;
         ruleProviderMap.set(providerUrl, providerName);
         const usesTextList = /\.(list|txt)$/i.test(providerUrl);
+        const usesMrs = /\.mrs$/i.test(new URL(providerUrl).pathname);
         ruleProviders[providerName] = {
             type: 'http',
-            behavior: getRuleProviderBehavior(providerUrl),
+            behavior: rule.providerBehavior || getRuleProviderBehavior(providerUrl),
             url: providerUrl,
-            path: `./ruleset/${providerName}.${usesTextList ? 'list' : 'yaml'}`,
-            interval: 86400,
-            ...(usesTextList ? { format: 'text' } : {})
+            path: `./ruleset/${providerName}.${usesMrs ? 'mrs' : usesTextList ? 'list' : 'yaml'}`,
+            interval: rule.interval || 86400,
+            ...(usesMrs ? { format: 'mrs' } : usesTextList ? { format: 'text' } : {})
         };
     });
 

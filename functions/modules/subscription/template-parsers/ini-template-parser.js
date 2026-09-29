@@ -66,9 +66,21 @@ function parseAclRuleSetLine(line) {
 
     const policy = parts[0];
     let source = parts.slice(1).join(',');
+    let providerBehavior;
+    let interval;
+
+    if (!source.startsWith('[]')) {
+        const intervalMatch = source.match(/^(.*),(\d+)$/);
+        if (intervalMatch) {
+            source = intervalMatch[1];
+            interval = Number(intervalMatch[2]);
+        }
+        const formatMatch = source.match(/^clash-(domain|ipcidr|classic):/i);
+        if (formatMatch) providerBehavior = formatMatch[1].toLowerCase() === 'classic' ? 'classical' : formatMatch[1].toLowerCase();
+    }
     
     // Clean up protocol prefixes like clash-classic:, surge:, etc.
-    source = source.replace(/^(clash-classic|surge|quanx|loon|sing-box|singbox):/i, '');
+    source = source.replace(/^(clash-classic|clash-domain|clash-ipcidr|surge|quanx|loon|sing-box|singbox):/i, '');
     
     if (source.startsWith('[]')) {
         const inlineValue = source.slice(2);
@@ -88,6 +100,8 @@ function parseAclRuleSetLine(line) {
         value: source,
         policy,
         source: 'remote',
+        providerBehavior,
+        interval,
         extras: []
     };
 }
