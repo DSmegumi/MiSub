@@ -2,6 +2,7 @@ import yaml from 'js-yaml';
 import { clashFix } from '../../../utils/format-utils.js';
 import { normalizeUnifiedTemplateModel } from '../template-model.js';
 import { DNS_PROXY_GROUP, resolveSafeDnsConfig } from '../safe-dns.js';
+import { applyMihomoChainProxy } from '../mihomo-chain-proxy.js';
 
 function mapGroupType(type) {
     const normalized = String(type || '')
@@ -153,16 +154,25 @@ function mapRule(rule, ruleProviderMap) {
     const type = String(rule.type || '').toUpperCase();
     if (!type) return null;
     if (type === 'MATCH' || type === 'FINAL') return `MATCH,${rule.policy}`;
-    if (type === 'GEOIP') return `GEOIP,${rule.value || 'CN'},${rule.policy}`;
+    const extras =
+        Array.isArray(rule.extras) && rule.extras.length ? `,${rule.extras.join(',')}` : '';
+    if (type === 'GEOIP') return `GEOIP,${rule.value || 'CN'},${rule.policy}${extras}`;
     if (type === 'RULE-SET') {
         const providerName = ruleProviderMap.get(rule.value);
-        return `RULE-SET,${providerName || rule.value},${rule.policy}`;
+        return `RULE-SET,${providerName || rule.value},${rule.policy}${extras}`;
     }
-    return `${type},${rule.value},${rule.policy}`;
+    return `${type},${rule.value},${rule.policy}${extras}`;
 }
 
 export function renderClashFromTemplateModel(model) {
     const normalizedModel = normalizeUnifiedTemplateModel(model);
+
+    // 所有客户端都保留链式策略组；仅 Mihomo/Meta 展开节点级 dialer-proxy。
+    if (Array.isArray(normalizedModel.extras?.chainProxy)) {
+        applyMihomoChainProxy(normalizedModel, {
+            enableDialerProxy: Boolean(normalizedModel.meta?.isMeta),
+        });
+    }
 
     const ruleProviders = {};
     const ruleProviderMap = new Map();

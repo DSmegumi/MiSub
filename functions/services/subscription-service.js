@@ -44,7 +44,12 @@ const REAL_PROXY_PROTOCOLS = [
     'anytls://',
     'socks5://',
     'socks://',
+    'http://',
+    'https://',
+    'naive+https://',
+    'naive+quic://',
     'wireguard://',
+    'mierus://',
 ];
 
 /**
@@ -169,6 +174,8 @@ export function inferAirportRootDomain(sourceUrl) {
         if (NON_AIRPORT_HOSTS.some((re) => re.test(host))) return '';
 
         const parts = host.split('.');
+        const suffix = parts.slice(-2).join('.');
+        const rootLabelCount = MULTI_LABEL_PUBLIC_SUFFIXES.has(suffix) ? 3 : 2;
         // 常见机场子域前缀（去掉后取主域名）
         const COMMON_SUBDOMAIN_LABELS = new Set([
             'sub',
@@ -198,7 +205,7 @@ export function inferAirportRootDomain(sourceUrl) {
             const first = parts[0];
             const isCommonPrefix = COMMON_SUBDOMAIN_LABELS.has(first);
             const isNumberedPrefix = /^[a-z]{0,4}\d+$/i.test(first); // 如 dy11 / sub12 / node3
-            base = isCommonPrefix || isNumberedPrefix ? parts.slice(1) : parts.slice(-2);
+            base = parts.slice(-rootLabelCount);
         } else {
             base = parts;
         }
@@ -210,6 +217,28 @@ export function inferAirportRootDomain(sourceUrl) {
         return '';
     }
 }
+
+const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
+    'com.cn',
+    'net.cn',
+    'org.cn',
+    'gov.cn',
+    'com.hk',
+    'com.tw',
+    'co.uk',
+    'org.uk',
+    'me.uk',
+    'ac.uk',
+    'gov.uk',
+    'com.au',
+    'net.au',
+    'org.au',
+    'co.jp',
+    'co.kr',
+    'co.nz',
+    'com.sg',
+    'appspot.com',
+]);
 
 /**
  * 抓取机场官网标题，作为品牌名的兜底识别来源。
@@ -647,7 +676,7 @@ export async function generateCombinedNodeList(
     // 重构后的手动节点处理逻辑
     const manualSubSourceGroups = misubs.filter((sub) => {
         const url = typeof sub?.url === 'string' ? sub.url.trim() : '';
-        return Boolean(url) && !url.toLowerCase().startsWith('http');
+        return Boolean(url) && !/^https?:\/\//i.test(url);
     });
 
     let manualProcessedLines = [];
@@ -680,10 +709,11 @@ export async function generateCombinedNodeList(
             // Ignore
         }
     }
-    const processedManualNodes = manualProcessedLines.join('\n');
+
+    const processedManualNodeList = manualProcessedLines.join('\n');
 
     const httpSubs = misubs.filter(
-        (sub) => sub && sub.url && sub.url.toLowerCase().startsWith('http')
+        (sub) => sub && sub.url && /^https?:\/\//i.test(sub.url) && !/^https?:\/\/[^/?#]+:\d+\/?#/i.test(sub.url)
     );
     const limiter = createConcurrencyLimiter(FETCH_CONFIG.CONCURRENCY);
     let upstreamSuccessCount = 0; // 追踪真正从远程拉取成功的订阅数（不含 per-sub 缓存回退）
@@ -852,7 +882,7 @@ export async function generateCombinedNodeList(
     const processedSubContents = await Promise.all(subPromises);
 
     // --- 阶段 1: 原始数据汇聚 (Raw Data Aggregation) ---
-    const rawCombinedLines = (processedManualNodes + '\n' + processedSubContents.join('\n'))
+    const rawCombinedLines = (processedManualNodeList + '\n' + processedSubContents.join('\n'))
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean);

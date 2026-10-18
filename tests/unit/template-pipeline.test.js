@@ -15,6 +15,30 @@ const SS2022_V2RAY_PLUGIN_NODE =
     'ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TldSak1UVmxNVFZtTWpnMU5HRTVaRGsxT1dJd1pUUm1ZbVJrTnpkaU5qTT0@cf.090227.xyz:8080?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Bhost%3Dss.2227tsj.workers.dev%3Bpath%3D%2F%3Fenc%5C%3D2022-blake3-aes-256-gcm%3Bmux%3D0#2022-blake3-aes-256-gcm';
 
 describe('Template pipeline', () => {
+    it('preserves no-resolve on template IP rules so proxy domains do not require local DNS for matching', () => {
+        const rendered = renderClashFromIniTemplate(
+            `
+[custom]
+ruleset=🎯 全球直连,[]GEOIP,private,no-resolve
+ruleset=🎯 全球直连,[]GEOIP,cn,no-resolve
+ruleset=🚀 手动选择,[]IP-CIDR,203.0.113.0/24,no-resolve
+ruleset=🚀 手动选择,[]IP-CIDR6,2001:db8::/32,no-resolve
+ruleset=🚀 手动选择,[]FINAL
+custom_proxy_group=🚀 手动选择\x60select\x60[]DIRECT
+custom_proxy_group=🎯 全球直连\x60select\x60[]DIRECT
+        `,
+            { ruleLevel: 'none' }
+        );
+        const parsed = yaml.load(rendered);
+        expect(parsed.rules).toEqual([
+            'GEOIP,private,🎯 全球直连,no-resolve',
+            'GEOIP,cn,🎯 全球直连,no-resolve',
+            'IP-CIDR,203.0.113.0/24,🚀 手动选择,no-resolve',
+            'IP-CIDR6,2001:db8::/32,🚀 手动选择,no-resolve',
+            'MATCH,🚀 手动选择',
+        ]);
+    });
+
     it('renders current Aethersailor domain MRS rule providers with the declared behavior and refresh interval', () => {
         const rendered = renderClashFromIniTemplate(`
 [custom]
@@ -327,6 +351,54 @@ MATCH,节点选择
         expect(model.groups.some((group) => group.name === '🚀 节点选择')).toBe(true);
     });
 
+    it('omits Clash-only VMess udp_relay_mode from sing-box template output', () => {
+        const vmessConfig = btoa(
+            JSON.stringify({
+                v: '2',
+                ps: 'VMessNode',
+                add: 'vmess.example.com',
+                port: '443',
+                id: 'safe-uuid',
+                aid: '0',
+                net: 'tcp',
+                type: 'none',
+                tls: '',
+            })
+        );
+        const rendered = renderSingboxFromIniTemplate(
+            '[Proxy Group]\\nNode = select, VMessNode\\n[Rule]\\nMATCH,Node',
+            {
+                nodeList: `vmess://${vmessConfig}`,
+                targetFormat: 'singbox',
+            }
+        );
+        const parsed = JSON.parse(rendered);
+        const vmess = parsed.outbounds.find((outbound) => outbound.tag === 'VMessNode');
+        expect(vmess?.udp_relay_mode).toBeUndefined();
+    });
+
+    it('omits Clash-only TUIC udp_relay_mode from sing-box template output', () => {
+        const rendered = renderSingboxFromIniTemplate(
+            '[Proxy Group]\\nNode = select, TUICNode\\n[Rule]\\nMATCH,Node',
+            {
+                proxies: [
+                    {
+                        name: 'TUICNode',
+                        type: 'tuic',
+                        server: 'tuic.example.com',
+                        port: 443,
+                        uuid: 'safe-uuid',
+                        password: 'safe-pass',
+                        'udp-relay-mode': 'native',
+                    },
+                ],
+                targetFormat: 'singbox',
+            }
+        );
+        const parsed = JSON.parse(rendered);
+        const tuic = parsed.outbounds.find((outbound) => outbound.tag === 'TUICNode');
+        expect(tuic?.udp_relay_mode).toBeUndefined();
+    });
     it('should render sing-box json from ACL4SSR custom template', () => {
         const builtinTemplate = getBuiltinTemplate('clash_acl4ssr_full');
         const rendered = renderSingboxFromIniTemplate(builtinTemplate.content, {

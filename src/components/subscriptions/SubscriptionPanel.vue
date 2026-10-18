@@ -1,14 +1,20 @@
 <script setup>
-    import { computed, ref, nextTick } from 'vue';
+    import { computed, ref, nextTick, watch } from 'vue';
     import draggable from 'vuedraggable';
     import Card from '../ui/Card.vue';
     import MoreActionsMenu from '@/components/shared/MoreActionsMenu.vue';
     import PanelPagination from '@/components/shared/PanelPagination.vue';
     import EmptyState from '@/components/ui/EmptyState.vue';
+    import Modal from '@/components/forms/Modal.vue';
     import { useUIStore } from '@/stores/ui';
     import { useI18n } from '@/i18n/index.js';
     import { inferAirportRootDomain } from '../../utils/airport-domain.js';
     import { lookupDomainName } from '../../utils/domain-name-memory.js';
+    import {
+        getAirportIdentityKey,
+        getAirportIdentityName,
+        createAirportGroupId,
+    } from '../../utils/airport-identity.js';
 
     const { layoutMode } = useUIStore();
     const { t } = useI18n();
@@ -22,11 +28,17 @@
         searchable: { type: Boolean, default: false },
         searchQuery: { type: String, default: '' },
         filteredCount: { type: Number, default: undefined },
-        // Active status filter coming from a dashboard deep link (?status=...).
+        isRefreshing: { type: Boolean, default: false },
+        refreshError: { type: Boolean, default: false },
+        lastRefreshAt: { type: [String, Number, Date], default: null },
         statusFilter: { type: String, default: '' },
         statusFilterLabel: { type: String, default: '' },
     });
 
+    const groupNameInput = ref('');
+    const selectedAirportGroup = ref('');
+    const editingSubscriptionIds = ref([]);
+    const showAirportIdentityEditor = ref(false);
     const emit = defineEmits([
         'add',
         'delete',
@@ -44,6 +56,9 @@
         'updateSearch',
         'applyDetectedName',
         'rename-group',
+        'reset-group',
+        'assign-airport-group',
+        'split-airport-group',
         'clearStatusFilter',
     ]);
 
@@ -53,6 +68,13 @@
     });
 
     const visibleCount = computed(() => props.filteredCount ?? props.subscriptions.length);
+    const refreshTime = computed(() => {
+        if (!props.lastRefreshAt) return '';
+        const date = new Date(props.lastRefreshAt);
+        return Number.isNaN(date.getTime())
+            ? ''
+            : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    });
 
     const draggableSubscriptions = computed({
         get: () => [...props.subscriptions],
@@ -74,11 +96,58 @@
 
     // 应用识别到的机场名：模板内联箭头函数无法访问 emit，需用具名函数转发
     // 一键重命名整组：转发给父组件并刷新折叠标题
-    const handleRenameGroup = (group) => {
+    const availableAirportGroups = computed(() => {
+        const groups = new Map();
+        props.subscriptions.forEach((item) => {
+            const identity = item.airportIdentity;
+            if (identity?.groupId && identity?.name) groups.set(identity.groupId, identity.name);
+        });
+        return [...groups].map(([groupId, name]) => ({ groupId, name }));
+    });
+    const handleResetGroup = (group) =>
+        emit(
+            'reset-group',
+            group.items.map((it) => it.id)
+        );
+    const openAirportIdentityEditor = (ids = props.subscriptions.map((item) => item.id)) => {
+        groupNameInput.value = '';
+        selectedAirportGroup.value = '';
+        editingSubscriptionIds.value = [...ids];
+        showAirportIdentityEditor.value = true;
+    };
+    const saveAirportIdentity = () => {
+        const name = groupNameInput.value.trim();
+        const existing = props.subscriptions
+            .map((item) => item.airportIdentity)
+            .find((identity) => identity?.groupId === selectedAirportGroup.value);
+        if (!selectedAirportGroup.value && !name) return;
+        const groupId = selectedAirportGroup.value || createAirportGroupId();
+        emit('assign-airport-group', [...editingSubscriptionIds.value], {
+            groupId,
+            name: existing?.name || name,
+        });
+        showAirportIdentityEditor.value = false;
+    };
+    const handleSplitAirportGroup = (group) => {
+        // 禁止后续域名启发式再次合并：每个订阅获得独立身份，但保留可识别的显示名。
+        group.items.forEach((item) => {
+            emit('split-airport-group', [item.id], {
+                groupId: createAirportGroupId(),
+                name: item.airportIdentity?.name || groupDetectedName(group),
+            });
+        });
+    };
+    const handleConfirmDetectedName = (group) => {
+        const name = groupDetectedName(group);
+        if (!name) return;
+        const retainedGroupId = group.items
+            .map((item) => item.airportIdentity?.groupId)
+            .find(Boolean);
         emit(
             'rename-group',
-            group.items.map((it) => it.id),
-            groupDetectedName(group)
+            group.items.map((item) => item.id),
+            name,
+            retainedGroupId || createAirportGroupId()
         );
         setTimeout(refreshNameMemory, 0);
     };
@@ -104,10 +173,7 @@
         const root = inferAirportRootDomain(`https://${raw}`) || raw;
         const parts = root.split('.');
         let main = parts[0];
-        // 处理 com.cn / co.uk 这类多段后缀
-        if (parts.length >= 3 && ['com', 'net', 'org', 'gov', 'edu', 'co'].includes(parts[1])) {
-            main = parts[1];
-        }
+        // Root domain inference already excludes public-suffix labels (e.g. com.cn/co.uk).
         // 去掉带分隔符的常见拼接后缀（如 xxx-vpn），再首字母大写
         // 注意：不剥离「紧贴」的 vpn（gsafevpn 应保留为 Gsafevpn）
         const cleaned = main
@@ -140,9 +206,12 @@
     const groupDisplayName = (group) => {
         // 依赖 version，改名后自动重算
         void nameMemoryVersion.value;
+        const confirmed = (group?.items || []).map(getAirportIdentityName).find(Boolean);
+        if (confirmed) return confirmed;
         const host = group?.host || '';
         if (host) {
-            const remembered = lookupDomainName(host);
+            const rootDomain = inferAirportRootDomain(`https://${host}`) || host;
+            const remembered = lookupDomainName(rootDomain);
             if (remembered) return remembered;
         }
         const detected = groupDetectedName(group);
@@ -159,20 +228,23 @@
     // 同一家机场常有多个订阅链接（域名相同、路径 token 不同），逐个平铺会很乱。
     // 这里按 URL 的域名自动聚合，同一站点的订阅源折叠为一组，可展开查看。
     const collapsedGroups = ref(new Set());
+    const knownGroupKeys = ref(new Set());
 
-    /** 从订阅 URL 提取站点标识（域名）；非 http 链接归入「其他」。 */
+    /**
+     * 从 URL 提取稳定的分组身份。
+     * 普通域名按推断出的机场根域聚合（子域、路径 token 不影响）；
+     * 在公共托管平台上不能将 tenants 合并到平台根域，保留其 tenant 主机名。
+     */
     const siteKeyOf = (sub) => {
-        try {
-            const host = new URL(sub.url).hostname;
-            return host ? host.replace(/^www\./, '') : '';
-        } catch (e) {
-            return '';
-        }
+        const inferredKey = getAirportIdentityKey(sub);
+        return inferredKey.startsWith('identity:')
+            ? inferredKey
+            : inferredKey.slice('site:'.length);
     };
 
     /**
-     * 将被分页截断的列表还原为完整列表，再按站点聚合。
-     * 注意：分组会绕过分页（组内项目一次性展示），因此这里使用完整列表。
+     * 始终按完整筛选结果分组，避免分页把同一机场的订阅拆散到不同页；
+     * 页面切换由分组列表分页，而非先分页订阅再尝试分组。
      */
     const groupedSubscriptions = computed(() => {
         const list = props.subscriptions || [];
@@ -200,9 +272,22 @@
         groupedSubscriptions.value.filter((g) => g.items.length > 1)
     );
 
-    /** 单条目站点（不折叠，直接平铺展示）。 */
+    const pageSubscriptionIds = computed(
+        () => new Set((props.paginatedSubscriptions || []).map((sub) => sub.id))
+    );
+
+    /** 当前分页命中组内任一条时显示组；组本身完整呈现但按首条排序锚定。 */
+    const visibleCollapsibleGroups = computed(() =>
+        collapsibleGroups.value.filter((group) =>
+            group.items.some((item) => pageSubscriptionIds.value.has(item.id))
+        )
+    );
+
+    /** 单条目站点仅在当前页平铺展示。 */
     const ungroupedSubscriptions = computed(() =>
-        groupedSubscriptions.value.filter((g) => g.items.length === 1).flatMap((g) => g.items)
+        groupedSubscriptions.value
+            .filter((g) => g.items.length === 1 && pageSubscriptionIds.value.has(g.items[0].id))
+            .flatMap((g) => g.items)
     );
 
     const toggleGroup = (key) => {
@@ -213,6 +298,21 @@
     };
 
     const isGroupCollapsed = (key) => collapsedGroups.value.has(key);
+
+    // 仅对新出现的分组应用默认折叠；过滤/分页更新时保留用户手动展开状态。
+    // 已消失分组的状态保留在本组件生命周期内，避免搜索/分页切换后忘记用户选择。
+    watch(
+        collapsibleGroups,
+        (groups) => {
+            const next = new Set(collapsedGroups.value);
+            groups.forEach((group) => {
+                if (!knownGroupKeys.value.has(group.key)) next.add(group.key);
+            });
+            groups.forEach((group) => knownGroupKeys.value.add(group.key));
+            collapsedGroups.value = next;
+        },
+        { immediate: true }
+    );
 
     const isGrouped = computed(() => collapsibleGroups.value.length > 0);
 
@@ -238,17 +338,39 @@
                         </h2>
                         <span
                             class="rounded-full bg-gray-100 px-2.5 py-0.5 text-sm font-semibold text-gray-700 dark:bg-white/10 dark:text-gray-200"
-                            >{{ subscriptions.length }}</span
+                            >{{ visibleCount }}/{{ subscriptions.length }}</span
                         >
                     </div>
                     <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                         {{ t('subscriptions.subtitle') }}
                     </p>
+                    <p
+                        data-testid="subscriptions-refresh-status"
+                        aria-live="polite"
+                        class="mt-1 text-xs text-gray-500 dark:text-gray-400"
+                    >
+                        <span v-if="isRefreshing">{{ t('subscriptions.refreshing') }}</span>
+                        <span v-else-if="refreshError">{{
+                            t('subscriptions.refreshFailedShort')
+                        }}</span>
+                        <span v-else-if="refreshTime">{{
+                            t('subscriptions.lastRefreshed', { time: refreshTime })
+                        }}</span>
+                    </p>
                 </div>
                 <div
                     class="flex flex-wrap items-center gap-2 sm:w-auto justify-end sm:justify-start"
                 >
-                    <slot name="actions-prepend"></slot>
+                    <button
+                        v-if="subscriptions.length > 1"
+                        type="button"
+                        class="shrink-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200"
+                        :title="t('subscriptions.assignAirportGroup')"
+                        @click.stop="openAirportIdentityEditor()"
+                    >
+                        {{ t('subscriptions.assignAirportGroup') }}
+                    </button>
+
                     <button
                         @click="handleImport"
                         class="shrink-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10"
@@ -258,7 +380,7 @@
                     <button
                         v-if="isGrouped && !isSorting"
                         @click="collapseAllGroups"
-                        class="shrink-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10"
+                        class="shrink-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200"
                     >
                         {{ t('subscriptions.collapseAll') }}
                     </button>
@@ -355,132 +477,18 @@
                 </button>
             </div>
         </div>
-        <div v-if="subscriptions.length > 0">
-            <draggable
-                v-if="isSorting"
-                tag="div"
-                class="grid grid-cols-1 md:grid-cols-2 gap-4"
-                v-model="draggableSubscriptions"
-                item-key="id"
-                animation="300"
-                @end="handleSortEnd"
-            >
-                <template #item="{ element: subscription }">
-                    <div class="cursor-move">
-                        <Card
-                            :misub="subscription"
-                            @delete="handleDelete(subscription.id)"
-                            @change="handleSortEnd"
-                            @update="handleUpdate(subscription.id)"
-                            @edit="handleEdit(subscription.id)"
-                            @preview="handlePreview(subscription.id)"
-                            @qrcode="handleQRCode(subscription.id)"
-                            @applyDetectedName="
-                                (name) => handleApplyDetectedName(subscription, name)
-                            "
-                        />
-                    </div>
-                </template>
-            </draggable>
-            <div v-else-if="paginatedSubscriptions.length > 0" class="space-y-4">
-                <!-- 按站点分组：同站点的多个订阅源折叠为一组 -->
-                <template v-if="isGrouped">
-                    <template v-for="group in collapsibleGroups" :key="group.key">
-                        <div
-                            class="rounded-xl border border-gray-100/80 bg-white/70 shadow-sm dark:border-white/10 dark:bg-gray-900/50"
-                        >
-                            <div class="flex w-full items-center justify-between gap-3 px-4 py-3">
-                                <button
-                                    type="button"
-                                    class="flex min-w-0 flex-1 items-center gap-2 text-left"
-                                    @click="toggleGroup(group.key)"
-                                >
-                                    <svg
-                                        class="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400 transition-transform"
-                                        :class="isGroupCollapsed(group.key) ? '-rotate-90' : ''"
-                                        viewBox="0 0 20 20"
-                                        fill="currentColor"
-                                        aria-hidden="true"
-                                    >
-                                        <path
-                                            fill-rule="evenodd"
-                                            d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                                            clip-rule="evenodd"
-                                        />
-                                    </svg>
-                                    <span
-                                        class="truncate font-semibold text-gray-800 dark:text-gray-100"
-                                    >
-                                        {{ groupDisplayName(group) }}
-                                    </span>
-                                    <span
-                                        class="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-600 dark:bg-white/10 dark:text-gray-300"
-                                    >
-                                        {{ group.items.length }}
-                                    </span>
-                                </button>
-                                <div class="flex shrink-0 items-center gap-2">
-                                    <!-- 一键重命名整组：使用识别到的机场名 + 序号，避免重名 -->
-                                    <button
-                                        v-if="groupDetectedName(group)"
-                                        type="button"
-                                        class="rounded-md border border-primary-500/30 px-2 py-1 text-[11px] font-medium text-primary-500 transition-colors hover:bg-primary-500/10 dark:text-primary-400"
-                                        :title="
-                                            t('subscriptions.renameGroupHint', {
-                                                name: groupDetectedName(group),
-                                            })
-                                        "
-                                        @click.stop="handleRenameGroup(group)"
-                                    >
-                                        {{ t('subscriptions.renameGroup') }}
-                                    </button>
-                                    <span class="text-xs text-gray-500 dark:text-gray-400">
-                                        {{
-                                            isGroupCollapsed(group.key)
-                                                ? t('subscriptions.expand')
-                                                : t('subscriptions.collapse')
-                                        }}
-                                    </span>
-                                </div>
-                            </div>
-                            <div
-                                v-show="!isGroupCollapsed(group.key)"
-                                class="grid grid-cols-1 gap-4 border-t border-gray-100/80 p-4 md:grid-cols-2 dark:border-white/10"
-                            >
-                                <div
-                                    v-for="(subscription, index) in group.items"
-                                    :key="subscription.id"
-                                    class="list-item-animation"
-                                    :style="{ '--delay-index': index }"
-                                >
-                                    <Card
-                                        :misub="subscription"
-                                        @delete="handleDelete(subscription.id)"
-                                        @change="handleSortEnd"
-                                        @update="handleUpdate(subscription.id)"
-                                        @edit="handleEdit(subscription.id)"
-                                        @preview="handlePreview(subscription.id)"
-                                        @qrcode="handleQRCode(subscription.id)"
-                                        @applyDetectedName="
-                                            (name) => handleApplyDetectedName(subscription, name)
-                                        "
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    </template>
-
-                    <!-- 单条目站点平铺 -->
-                    <div
-                        v-if="ungroupedSubscriptions.length > 0"
-                        class="grid grid-cols-1 gap-4 md:grid-cols-2"
-                    >
-                        <div
-                            v-for="(subscription, index) in ungroupedSubscriptions"
-                            :key="subscription.id"
-                            class="list-item-animation"
-                            :style="{ '--delay-index': index }"
-                        >
+        <div v-if="subscriptions.length > 0 && isSorting">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <draggable
+                    tag="div"
+                    class="contents"
+                    v-model="draggableSubscriptions"
+                    item-key="id"
+                    animation="300"
+                    @end="handleSortEnd"
+                >
+                    <template #item="{ element: subscription }">
+                        <div class="cursor-move">
                             <Card
                                 :misub="subscription"
                                 @delete="handleDelete(subscription.id)"
@@ -494,12 +502,129 @@
                                 "
                             />
                         </div>
+                    </template>
+                </draggable>
+            </div>
+        </div>
+        <div v-else-if="paginatedSubscriptions.length > 0" class="space-y-4">
+            <!-- 按站点分组：同站点的多个订阅源折叠为一组 -->
+            <template v-if="isGrouped">
+                <template v-for="group in visibleCollapsibleGroups" :key="group.key">
+                    <div
+                        class="rounded-xl border border-gray-100/80 bg-white/70 shadow-sm dark:border-white/10 dark:bg-gray-900/50"
+                    >
+                        <div class="flex w-full items-center justify-between gap-3 px-4 py-3">
+                            <button
+                                type="button"
+                                :aria-expanded="String(!isGroupCollapsed(group.key))"
+                                class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                                @click="toggleGroup(group.key)"
+                            >
+                                <svg
+                                    class="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400 transition-transform"
+                                    :class="isGroupCollapsed(group.key) ? '-rotate-90' : ''"
+                                    viewBox="0 0 20 20"
+                                    fill="currentColor"
+                                    aria-hidden="true"
+                                >
+                                    <path
+                                        fill-rule="evenodd"
+                                        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                                        clip-rule="evenodd"
+                                    />
+                                </svg>
+                                <span
+                                    class="truncate font-semibold text-gray-800 dark:text-gray-100"
+                                    >{{ groupDisplayName(group) }}</span
+                                >
+                                <span
+                                    class="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-600 dark:bg-white/10 dark:text-gray-300"
+                                    >{{ group.items.length }}</span
+                                >
+                            </button>
+                            <div class="flex shrink-0 items-center gap-2">
+                                <button
+                                    v-if="groupDetectedName(group)"
+                                    type="button"
+                                    class="rounded-md border border-primary-500/30 px-2 py-1 text-[11px] font-medium text-primary-500 transition-colors hover:bg-primary-500/10 dark:text-primary-400"
+                                    :title="
+                                        t('subscriptions.renameGroupHint', {
+                                            name: groupDetectedName(group),
+                                        })
+                                    "
+                                    @click.stop="handleConfirmDetectedName(group)"
+                                >
+                                    {{ t('subscriptions.renameGroup') }}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="rounded-md border border-gray-300/60 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-500/10 dark:border-white/15 dark:text-gray-300"
+                                    :title="t('subscriptions.assignAirportGroup')"
+                                    @click.stop="
+                                        openAirportIdentityEditor(
+                                            group.items.map((item) => item.id)
+                                        )
+                                    "
+                                >
+                                    {{ t('subscriptions.assignAirportGroup') }}
+                                </button>
+                                <button
+                                    v-if="group.items.length > 1"
+                                    type="button"
+                                    class="rounded-md border border-gray-300/60 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-500/10 dark:border-white/15 dark:text-gray-300"
+                                    :title="t('subscriptions.splitAirportGroup')"
+                                    @click.stop="handleSplitAirportGroup(group)"
+                                >
+                                    {{ t('subscriptions.splitAirportGroup') }}
+                                </button>
+                                <button
+                                    v-if="group.items.some((item) => item.airportIdentity?.groupId)"
+                                    type="button"
+                                    class="rounded-md border border-gray-300/60 px-2 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-500/10 dark:border-white/15 dark:text-gray-300"
+                                    :title="t('subscriptions.automaticAirportIdentity')"
+                                    @click.stop="handleResetGroup(group)"
+                                >
+                                    {{ t('subscriptions.automaticAirportIdentity') }}
+                                </button>
+                                <span class="text-xs text-gray-500 dark:text-gray-400">{{
+                                    isGroupCollapsed(group.key)
+                                        ? t('subscriptions.expand')
+                                        : t('subscriptions.collapse')
+                                }}</span>
+                            </div>
+                        </div>
+                        <div
+                            v-show="!isGroupCollapsed(group.key)"
+                            class="grid grid-cols-1 gap-4 border-t border-gray-100/80 p-4 md:grid-cols-2 dark:border-white/10"
+                        >
+                            <div
+                                v-for="(subscription, index) in group.items"
+                                :key="subscription.id"
+                                class="list-item-animation"
+                                :style="{ '--delay-index': index }"
+                            >
+                                <Card
+                                    :misub="subscription"
+                                    @delete="handleDelete(subscription.id)"
+                                    @change="handleSortEnd"
+                                    @update="handleUpdate(subscription.id)"
+                                    @edit="handleEdit(subscription.id)"
+                                    @preview="handlePreview(subscription.id)"
+                                    @qrcode="handleQRCode(subscription.id)"
+                                    @applyDetectedName="
+                                        (name) => handleApplyDetectedName(subscription, name)
+                                    "
+                                />
+                            </div>
+                        </div>
                     </div>
                 </template>
-
-                <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div
+                    v-if="ungroupedSubscriptions.length > 0"
+                    class="grid grid-cols-1 gap-4 md:grid-cols-2"
+                >
                     <div
-                        v-for="(subscription, index) in paginatedSubscriptions"
+                        v-for="(subscription, index) in ungroupedSubscriptions"
                         :key="subscription.id"
                         class="list-item-animation"
                         :style="{ '--delay-index': index }"
@@ -518,34 +643,46 @@
                         />
                     </div>
                 </div>
-            </div>
-            <div
-                v-else
-                class="rounded-xl border border-dashed border-gray-300 bg-white/60 px-6 py-12 text-center dark:border-gray-700 dark:bg-gray-900/50"
-            >
-                <p class="text-sm font-medium text-gray-700 dark:text-gray-200">
-                    {{ t('subscriptions.noSearchResults') }}
-                </p>
-                <button
-                    type="button"
-                    class="mt-3 text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
-                    @click="searchModel = ''"
+            </template>
+            <div v-else class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div
+                    v-for="(subscription, index) in paginatedSubscriptions"
+                    :key="subscription.id"
+                    class="list-item-animation"
+                    :style="{ '--delay-index': index }"
                 >
-                    {{ t('actions.clearSearch') }}
-                </button>
+                    <Card
+                        :misub="subscription"
+                        @delete="handleDelete(subscription.id)"
+                        @change="handleSortEnd"
+                        @update="handleUpdate(subscription.id)"
+                        @edit="handleEdit(subscription.id)"
+                        @preview="handlePreview(subscription.id)"
+                        @qrcode="handleQRCode(subscription.id)"
+                        @applyDetectedName="(name) => handleApplyDetectedName(subscription, name)"
+                    />
+                </div>
             </div>
-            <PanelPagination
-                v-if="totalPages > 1 && !isSorting"
-                variant="panel"
-                :current-page="currentPage"
-                :total-pages="totalPages"
-                :total-items="visibleCount"
-                :show-total-items="true"
-                @change-page="handleChangePage"
-            />
         </div>
         <div
-            v-else
+            v-else-if="searchable && searchQuery && filteredCount === 0"
+            data-testid="subscription-no-search-results"
+            class="rounded-xl border border-dashed border-gray-300 bg-white/60 px-6 py-12 text-center dark:border-gray-700 dark:bg-gray-900/50"
+        >
+            <p class="text-sm font-medium text-gray-700 dark:text-gray-200">
+                {{ t('subscriptions.noSearchResults') }}
+            </p>
+            <button
+                data-testid="clear-subscription-search"
+                type="button"
+                class="mt-3 text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
+                @click="searchModel = ''"
+            >
+                {{ t('actions.clearSearch') }}
+            </button>
+        </div>
+        <div
+            v-else-if="subscriptions.length === 0"
             class="rounded-xl border border-dashed border-gray-300 bg-white/60 py-6 dark:border-gray-700 dark:bg-gray-900/50"
         >
             <EmptyState
@@ -571,6 +708,56 @@
                 </button>
             </div>
         </div>
+        <div v-if="!isSorting && totalPages > 1" class="mt-4">
+            <PanelPagination
+                variant="panel"
+                :current-page="currentPage"
+                :total-pages="totalPages"
+                :total-items="visibleCount"
+                :show-total-items="true"
+                @change-page="handleChangePage"
+            />
+        </div>
+        <Modal
+            :show="showAirportIdentityEditor"
+            size="md"
+            :confirm-text="t('subscriptions.saveAirportIdentity')"
+            :confirm-disabled="!selectedAirportGroup && !groupNameInput.trim()"
+            @update:show="showAirportIdentityEditor = $event"
+            @confirm="saveAirportIdentity"
+        >
+            <template #title>
+                <h3 class="text-lg font-bold text-gray-900 dark:text-white">
+                    {{ t('subscriptions.assignAirportGroup') }}
+                </h3>
+            </template>
+            <template #body>
+                <div class="space-y-4">
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                        {{ t('subscriptions.chooseAirportGroup') }}
+                    </p>
+                    <select
+                        v-model="selectedAirportGroup"
+                        class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-primary-500 dark:border-white/15 dark:bg-gray-800 dark:text-white"
+                    >
+                        <option value="">{{ t('subscriptions.newAirportGroupName') }}</option>
+                        <option
+                            v-for="airport in availableAirportGroups"
+                            :key="airport.groupId"
+                            :value="airport.groupId"
+                        >
+                            {{ airport.name }}
+                        </option>
+                    </select>
+                    <input
+                        v-if="!selectedAirportGroup"
+                        v-model="groupNameInput"
+                        class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-primary-500 dark:border-white/15 dark:bg-gray-800 dark:text-white"
+                        :placeholder="t('subscriptions.newAirportGroupName')"
+                    />
+                </div>
+            </template>
+        </Modal>
     </div>
 </template>
 

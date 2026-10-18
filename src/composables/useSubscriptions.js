@@ -7,6 +7,7 @@ import { fetchNodeCount, batchUpdateNodes } from '../lib/api.js';
 import { handleError } from '../utils/errorHandler.js';
 import { TIMING } from '../constants/timing.js';
 import { t } from '../i18n/index.js';
+import { getAirportIdentityKey } from '../utils/airport-identity.js';
 
 const isDev = import.meta.env.DEV;
 
@@ -24,6 +25,9 @@ export function useSubscriptions(markDirty) {
     });
 
     const searchQuery = ref('');
+    const refreshError = ref(false);
+    const lastRefreshAt = ref(null);
+    const isRefreshing = ref(false);
     const filteredSubscriptions = computed(() => {
         const query = searchQuery.value.trim().toLowerCase();
         if (!query) return subscriptions.value;
@@ -47,8 +51,27 @@ export function useSubscriptions(markDirty) {
 
     const subsCurrentPage = ref(1);
     const subsItemsPerPage = 6;
-
     const enabledSubscriptions = computed(() => subscriptions.value.filter((s) => s.enabled));
+
+    /** 保持同一站点订阅相邻，避免分页后多个机场组交错出现。 */
+    const orderedFilteredSubscriptions = computed(() => {
+        const filteredIds = new Set(filteredSubscriptions.value.map((sub) => sub.id));
+        const ordered = [];
+        const groups = new Map();
+        (allSubscriptions.value || []).forEach((sub) => {
+            if (!filteredIds.has(sub.id) || !/^https?:\/\//i.test(String(sub.url || ''))) return;
+            const key = getAirportIdentityKey(sub);
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(sub);
+        });
+        const grouped = [...groups.entries()].sort(([, left], [, right]) => {
+            const leftMerged = left.length > 1 ? 1 : 0;
+            const rightMerged = right.length > 1 ? 1 : 0;
+            return rightMerged - leftMerged;
+        });
+        grouped.forEach(([, items]) => ordered.push(...items));
+        return ordered;
+    });
 
     const totalRemainingTraffic = computed(() => {
         const REASONABLE_TRAFFIC_LIMIT_BYTES = 10 * 1024 * 1024 * 1024 * 1024 * 1024; // 10 PB in bytes
@@ -69,16 +92,22 @@ export function useSubscriptions(markDirty) {
     });
 
     const subsTotalPages = computed(() =>
-        Math.ceil(filteredSubscriptions.value.length / subsItemsPerPage)
+        Math.ceil(orderedFilteredSubscriptions.value.length / subsItemsPerPage)
     );
     const paginatedSubscriptions = computed(() => {
         const start = (subsCurrentPage.value - 1) * subsItemsPerPage;
         const end = start + subsItemsPerPage;
-        return filteredSubscriptions.value.slice(start, end);
+        return orderedFilteredSubscriptions.value.slice(start, end);
     });
 
-    watch(searchQuery, () => {
+    watch([searchQuery, () => filteredSubscriptions.value.length], () => {
         subsCurrentPage.value = 1;
+    });
+
+    watch([filteredSubscriptions, subsTotalPages], () => {
+        if (subsCurrentPage.value > subsTotalPages.value) {
+            subsCurrentPage.value = Math.max(1, subsTotalPages.value);
+        }
     });
 
     function changeSubsPage(page) {
@@ -323,6 +352,8 @@ export function useSubscriptions(markDirty) {
             return;
         }
 
+        isRefreshing.value = true;
+        refreshError.value = false;
         subsToUpdate.forEach((sub) => {
             sub.isUpdating = true;
         });
@@ -363,6 +394,7 @@ export function useSubscriptions(markDirty) {
                 }
 
                 const failedCount = subsToUpdate.length - successCount;
+                refreshError.value = failedCount > 0;
                 showToast(
                     t('subscriptions.refreshDone', {
                         success: successCount,
@@ -379,11 +411,13 @@ export function useSubscriptions(markDirty) {
                     }),
                     'error'
                 );
+                refreshError.value = true;
                 for (const sub of subsToUpdate) {
                     await handleUpdateNodeCount(sub.id);
                 }
             }
         } catch (error) {
+            refreshError.value = true;
             handleError(error, 'Batch Subscription Update Error', {
                 subscriptionCount: subsToUpdate.length,
             });
@@ -392,6 +426,8 @@ export function useSubscriptions(markDirty) {
                 await handleUpdateNodeCount(sub.id);
             }
         } finally {
+            lastRefreshAt.value = new Date().toISOString();
+            isRefreshing.value = false;
             subsToUpdate.forEach((sub) => {
                 sub.isUpdating = false;
             });
@@ -494,8 +530,12 @@ export function useSubscriptions(markDirty) {
 
     return {
         subscriptions,
-        filteredSubscriptions,
         searchQuery,
+        filteredSubscriptions,
+        filteredCount: computed(() => filteredSubscriptions.value.length),
+        isRefreshing,
+        refreshError,
+        lastRefreshAt,
         subsCurrentPage,
         subsTotalPages,
         paginatedSubscriptions,

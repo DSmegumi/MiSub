@@ -116,6 +116,12 @@
 
     const {
         subscriptions,
+        searchQuery: subscriptionSearchQuery,
+        filteredSubscriptions: filteredSubscriptionList,
+        filteredCount: filteredSubscriptionCount,
+        isRefreshing: isRefreshingSubscriptions,
+        refreshError: subscriptionRefreshError,
+        lastRefreshAt: lastSubscriptionRefreshAt,
         subsCurrentPage,
         subsTotalPages,
         paginatedSubscriptions,
@@ -408,7 +414,11 @@
         if (!target) return;
         const subscription = subscriptions.value.find((s) => s.id === subscriptionId);
         if (!subscription) return;
-        updateSubscription(subscriptionId, { name: target });
+        // useSubscriptions.updateSubscription requires the complete subscription object.
+        updateSubscription({ ...subscription, name: target });
+        // Persist the confirmed name by airport root domain, matching the groups page.
+        const domain = inferAirportRootDomain(subscription.url);
+        if (domain) rememberDomainName(domain, target);
         showToast(t('subscriptions.nameApplied', { name: target }), 'success');
     };
 
@@ -491,11 +501,18 @@
             <div class="space-y-8 lg:space-y-9 xl:col-span-2">
                 <!-- Subscription Panel -->
                 <SubscriptionPanel
+                    searchable
+                    :search-query="subscriptionSearchQuery"
+                    :filtered-count="filteredSubscriptionCount"
+                    :is-refreshing="isRefreshingSubscriptions"
+                    :refresh-error="subscriptionRefreshError"
+                    :last-refresh-at="lastSubscriptionRefreshAt"
                     :subscriptions="subscriptions"
                     :paginated-subscriptions="paginatedSubscriptions"
                     :current-page="subsCurrentPage"
                     :total-pages="subsTotalPages"
                     :is-sorting="isSortingSubs"
+                    @update-search="(query) => (subscriptionSearchQuery = query)"
                     @add="handleAddSubscription"
                     @delete="handleDeleteSubscriptionWithCleanup"
                     @change-page="changeSubsPage"
