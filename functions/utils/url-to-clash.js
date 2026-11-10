@@ -5,6 +5,7 @@
 import { extractNodeMetadata } from '../modules/utils/metadata-extractor.js';
 import { isLocalProxyEndpoint } from './node-utils.js';
 import { parseXhttpExtra, applyDownloadInheritanceGuard } from './xhttp-extra.js';
+import { parseEchParams } from './ech.js';
 
 const VIRTUAL_INFO_NODE_PASSWORD = '00000000-0000-0000-0000-000000000000';
 
@@ -269,6 +270,12 @@ function parseVlessUrl(url) {
             }
         } else if (security === 'tls') {
             proxy.tls = true;
+        }
+
+        const ech = parseEchParams(params);
+        if (ech) {
+            if (security !== 'tls') throw new Error('ECH requires TLS without REALITY');
+            proxy['ech-opts'] = ech;
         }
 
         // Skip cert verify (统一支持 allowInsecure 和 insecure)

@@ -1,4 +1,5 @@
 import { serializeXhttpExtra } from './xhttp-extra.js';
+import { appendEchParams } from './ech.js';
 
 function base64Encode(str) {
     return btoa(unescape(encodeURIComponent(str)));
@@ -259,6 +260,7 @@ export function convertClashProxyToUrl(proxy) {
                 params.push('security=tls');
             }
             if (proxy.flow) params.push(`flow=${proxy.flow}`);
+            appendEchParams(params, proxy['ech-opts']);
             const sniVal = proxy.servername !== undefined ? proxy.servername : proxy.sni;
             if (sniVal !== undefined) params.push(`sni=${encodeURIComponent(sniVal)}`);
             if (proxy['client-fingerprint'])

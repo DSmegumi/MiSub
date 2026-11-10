@@ -3,6 +3,7 @@ import { clashFix } from '../../../utils/format-utils.js';
 import { normalizeUnifiedTemplateModel } from '../template-model.js';
 import { DNS_PROXY_GROUP, resolveSafeDnsConfig } from '../safe-dns.js';
 import { applyMihomoChainProxy } from '../mihomo-chain-proxy.js';
+import { withEchDnsPolicies } from '../../../utils/ech.js';
 
 function mapGroupType(type) {
     const normalized = String(type || '')
@@ -237,10 +238,13 @@ export function renderClashFromTemplateModel(model) {
         mode: 'rule',
         'log-level': 'info',
         'external-controller': '127.0.0.1:9090',
-        dns: resolveSafeDnsConfig(normalizedModel.settings?.customDnsOverride, {
-            mode: normalizedModel.settings?.dnsMode,
-            proxyGroup: DNS_PROXY_GROUP,
-        }),
+        dns: withEchDnsPolicies(
+            resolveSafeDnsConfig(normalizedModel.settings?.customDnsOverride, {
+                mode: normalizedModel.settings?.dnsMode,
+                proxyGroup: DNS_PROXY_GROUP,
+            }),
+            normalizedModel.proxies
+        ),
         proxies: normalizedModel.proxies,
         'proxy-groups': normalizedModel.groups
             .filter(

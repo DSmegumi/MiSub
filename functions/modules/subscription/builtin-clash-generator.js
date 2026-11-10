@@ -5,6 +5,7 @@
  */
 
 import { urlsToClashProxies } from '../../utils/url-to-clash.js';
+import { withEchDnsPolicies } from '../../utils/ech.js';
 import { getUniqueName } from './name-utils.js';
 import { isMetaCore } from './user-agent-utils.js';
 import { DNS_PROXY_GROUP, resolveSafeDnsConfig } from './safe-dns.js';
@@ -228,7 +229,7 @@ export function generateBuiltinClashConfig(nodeList, options = {}) {
             'log-level': 'info',
             'external-controller': '127.0.0.1:9090',
 
-            dns: dnsConfig,
+            dns: withEchDnsPolicies(dnsConfig, publicProxies),
 
             proxies: publicProxies,
             profile: {
