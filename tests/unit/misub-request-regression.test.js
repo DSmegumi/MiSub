@@ -50,6 +50,30 @@ describe('handleMisubRequest regression coverage', () => {
         vi.restoreAllMocks();
     });
 
+    it('adapts ECH only in the actual Xray base64 response, leaving other clients unchanged', async () => {
+        const uri = 'vless://00000000-0000-4000-8000-000000000001@preferred.example.com:2083?security=tls&type=xhttp&sni=owned.example.com&ech=cloudflare-ech.com#test';
+        const adapter = createStorageAdapter({
+            settings: { mytoken: 'stable-token', enableFlagEmoji: false, enableTrafficNode: false },
+            subscriptions: [{ id: 'sub-ech', name: 'ECH', url: 'https://airport.example/sub', enabled: true }],
+        });
+        createAdapter.mockReturnValue(adapter);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(uri, { status: 200 })));
+        silenceExpectedRequestLogs();
+        const { handleMisubRequest } = await import('../../functions/modules/subscription/main-handler.js');
+        for (const [agent, expected] of [
+            ['v2rayNG/2.3.14', 'cloudflare-ech.com+https://dns.alidns.com/dns-query'],
+            ['ClashMeta', 'cloudflare-ech.com'],
+        ]) {
+            const response = await handleMisubRequest({
+                request: new Request('https://misub.example/stable-token?target=base64&refresh=1', { headers: { 'User-Agent': agent } }),
+                env: {}, waitUntil: vi.fn(),
+            });
+            expect(response.status).toBe(200);
+            const decoded = atob(await response.text()).trim();
+            expect(new URL(decoded).searchParams.get('ech')).toBe(expected);
+        }
+    });
+
     it('uses the real storage adapter for per-subscription protective node cache', async () => {
         const subscriptions = [
             {

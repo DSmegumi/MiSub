@@ -51,6 +51,7 @@ import {
 import { handleProfileMode } from './profile-handler.js';
 import { getBuiltinTemplate } from './builtin-template-registry.js';
 import { assertPublicNetworkUrl } from '../security-utils.js';
+import { adaptXrayEchSubscription } from '../../utils/xray-ech.js';
 
 function maskSensitiveLogValue(value) {
     const text = String(value ?? '');
@@ -1331,7 +1332,7 @@ export async function handleMisubRequest(context) {
             }
         }
 
-        return new Response(base64EncodeUtf8(contentToEncode), { headers });
+        return new Response(base64EncodeUtf8(adaptXrayEchSubscription(contentToEncode, userAgentHeader)), { headers });
     }
 
     // [Subconverter API] URL 参数优先级高于全局/Profile 设置
@@ -1486,5 +1487,5 @@ export async function handleMisubRequest(context) {
         base64Headers[key] = value;
     });
 
-    return new Response(base64EncodeUtf8(combinedNodeList), { headers: base64Headers });
+    return new Response(base64EncodeUtf8(adaptXrayEchSubscription(combinedNodeList, userAgentHeader)), { headers: base64Headers });
 }
